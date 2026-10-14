@@ -1,0 +1,1332 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Letícia &amp; Cesar — O Grande Sim 💍</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden;background:#0a0312}
+  body{
+    font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+    display:flex;align-items:center;justify-content:center;
+    touch-action:none;-webkit-user-select:none;user-select:none;
+  }
+  #wrap{position:relative;width:min(100vw,133.333vh);max-height:100vh;}
+  canvas{
+    display:block;width:100%;height:auto;border-radius:14px;
+    box-shadow:0 0 70px rgba(255,110,180,.35),0 0 0 1px rgba(255,180,220,.15);
+    touch-action:none;cursor:pointer;
+  }
+  #fsBtn{
+    position:absolute;top:14px;right:14px;width:44px;height:44px;
+    border:2px solid rgba(255,180,220,.5);border-radius:12px;
+    background:rgba(30,8,46,.7);color:#ffd9ec;font-size:22px;
+    cursor:pointer;z-index:10;display:flex;align-items:center;justify-content:center;
+    transition:transform .15s,background .15s;
+  }
+  #fsBtn:hover{background:rgba(255,60,120,.4);transform:scale(1.06)}
+  #fsBtn:active{transform:scale(.95)}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+  <button id="fsBtn" title="Tela cheia">⛶</button>
+</div>
+<script>
+(() => {
+"use strict";
+
+/* ================== CONFIG ================== */
+const cvs = document.getElementById('game');
+const W = 800, H = 600;
+cvs.width = W; cvs.height = H;
+const ctx = cvs.getContext('2d');
+
+const GROUND = 460;
+const LET_X  = 700;
+const MIN_X = 56, MAX_X = W - 56;
+const MAX_LIVES = 3;
+
+const LEVELS = [
+  { name:'FASE 1 • O Primeiro Olhar', goal: 60, time: 45, spawn: 0.80, bad: 0.20, fall: 150 },
+  { name:'FASE 2 • O Pedido',         goal: 90, time: 50, spawn: 0.68, bad: 0.28, fall: 180 },
+  { name:'FASE 3 • O Grande Dia',    goal:120, time: 55, spawn: 0.58, bad: 0.34, fall: 210 },
+];
+
+const MSGS = [
+  'Cesar tomou coragem e trocou o primeiro olhar com Letícia... 💗',
+  'Ele se ajoelhou, abriu o coração e ouviu um "SIM!" 💍',
+  'O grande dia chegou. Rumo ao altar! 👰🤵',
+];
+
+/* ================== ÁUDIO ================== */
+let actx = null;
+function initAudio(){
+  if (actx) { if (actx.state === 'suspended') actx.resume(); return; }
+  try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){}
+}
+function sfx(freq, dur, type='sine', vol=0.06, slide=0){
+  if (!actx) return;
+  try{
+    const t = actx.currentTime;
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, t);
+    if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(60, freq + slide), t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(actx.destination);
+    o.start(t); o.stop(t + dur + 0.02);
+  }catch(e){}
+}
+
+/* ================== HELPERS ================== */
+const clamp = (v,a,b) => v < a ? a : (v > b ? b : v);
+const lerp  = (a,b,t) => a + (b-a)*t;
+const smooth= t => t*t*(3-2*t);
+function rr(x,y,w,h,r){
+  r = Math.min(r, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+function heartPath(x,y,s){
+  ctx.beginPath();
+  ctx.moveTo(x, y + s*0.78);
+  ctx.bezierCurveTo(x - s*1.45, y - s*0.35, x - s*0.58, y - s*1.18, x, y - s*0.28);
+  ctx.bezierCurveTo(x + s*0.58, y - s*1.18, x + s*1.45, y - s*0.35, x, y + s*0.78);
+  ctx.closePath();
+}
+
+/* ================== ESTADO ================== */
+const state = {
+  scene: 'menu',
+  level: 0,
+  love: 0,
+  lives: MAX_LIVES,
+  invuln: 0,
+  timeLeft: 0,
+  t: 0,
+  shake: 0,
+  spawnT: 0,
+  msgTimer: 0,
+  cutT: 0,
+  wedT: 0,
+  player: { x: W/2, vx: 0 },
+  items: [],
+  particles: [],
+  confetti: [],
+  leavingX: 0,
+};
+
+const keys = { left:false, right:false };
+
+/* ================== JOYSTICK ================== */
+const JOY = {
+  active: false,
+  pointerId: null,
+  cx: 0, cy: 0,
+  kx: 0, ky: 0,
+  vx: 0, vy: 0,
+  maxR: 68,
+  baseR: 88,
+  knobR: 38,
+  hint: { x: 130, y: H - 110, a: 0.35 }
+};
+
+/* ================== CENÁRIO ================== */
+const stars = Array.from({length: 70}, () => ({
+  x: Math.random()*W, y: Math.random()*GROUND,
+  r: Math.random()*1.6 + 0.4,
+  p: Math.random()*Math.PI*2, s: 0.6 + Math.random()*1.6,
+}));
+const bgHearts = Array.from({length: 12}, () => ({
+  x: Math.random()*W, y: Math.random()*H,
+  s: 6 + Math.random()*14, v: 12 + Math.random()*26,
+  a: 0.05 + Math.random()*0.12, p: Math.random()*Math.PI*2,
+}));
+
+/* ================== DESENHO: CESAR ================== */
+function drawCesar(cx, by, s, t, walking, sad){
+  ctx.save();
+  ctx.translate(cx, by); ctx.scale(s, s);
+  const bob = walking ? Math.abs(Math.sin(t*11))*3 : Math.sin(t*3)*1.2;
+  ctx.translate(0, -bob);
+
+  // pernas
+  ctx.fillStyle = '#15152a';
+  rr(-13, -27, 10, 27, 4); ctx.fill();
+  rr(3, -27, 10, 27, 4); ctx.fill();
+  ctx.fillStyle = '#0a0a12';
+  rr(-17, -8, 16, 8, 3); ctx.fill();
+  rr(1, -8, 16, 8, 3); ctx.fill();
+  // paletó
+  ctx.fillStyle = '#22375f';
+  rr(-19, -66, 38, 44, 11); ctx.fill();
+  // camisa
+  ctx.fillStyle = '#fdfdff';
+  ctx.beginPath();
+  ctx.moveTo(-8,-66); ctx.lineTo(0,-40); ctx.lineTo(8,-66);
+  ctx.closePath(); ctx.fill();
+  // gravata
+  ctx.fillStyle = '#e23b52';
+  ctx.beginPath();
+  ctx.moveTo(0,-65); ctx.lineTo(-5,-58); ctx.lineTo(0,-39); ctx.lineTo(5,-58);
+  ctx.closePath(); ctx.fill();
+  // braços
+  ctx.fillStyle = '#22375f';
+  rr(-26,-64,10,32,5); ctx.fill();
+  rr(16,-64,10,32,5); ctx.fill();
+  // mãos
+  ctx.fillStyle = '#f2c49b';
+  ctx.beginPath(); ctx.arc(-21,-33,6,0,7); ctx.fill();
+  ctx.beginPath(); ctx.arc(21,-33,6,0,7); ctx.fill();
+  // cabeça
+  ctx.fillStyle = '#f2c49b';
+  ctx.beginPath(); ctx.arc(0,-80,16,0,7); ctx.fill();
+  // cabelo
+  ctx.fillStyle = '#2a1a12';
+  ctx.beginPath(); ctx.arc(0,-82,16.6, Math.PI*1.02, Math.PI*1.98); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(-13,-84,5,7,0.3,0,7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(13,-84,5,7,-0.3,0,7); ctx.fill();
+  // olhos
+  ctx.fillStyle = '#241a14';
+  ctx.beginPath(); ctx.arc(-6,-80,2.1,0,7); ctx.fill();
+  ctx.beginPath(); ctx.arc(6,-80,2.1,0,7); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.85)';
+  ctx.beginPath(); ctx.arc(-5.3,-80.8,0.8,0,7); ctx.fill();
+  ctx.beginPath(); ctx.arc(6.7,-80.8,0.8,0,7); ctx.fill();
+  // boca
+  ctx.strokeStyle = '#a05a3a'; ctx.lineWidth = 1.8; ctx.lineCap='round';
+  if (sad){
+    ctx.beginPath(); ctx.arc(0,-70,5.5, 1.18*Math.PI, 1.82*Math.PI); ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.arc(0,-74,5.5, 0.18*Math.PI, 0.82*Math.PI); ctx.stroke();
+  }
+  // bochechas
+  ctx.fillStyle = 'rgba(255,120,150,.45)';
+  ctx.beginPath(); ctx.arc(-11,-75,3.6,0,7); ctx.fill();
+  ctx.beginPath(); ctx.arc(11,-75,3.6,0,7); ctx.fill();
+  ctx.restore();
+}
+
+/* ================== DESENHO: LETÍCIA ================== */
+function drawLeticia(cx, by, s, t, waving, sad){
+  ctx.save();
+  ctx.translate(cx, by); ctx.scale(s, s);
+  const bob = Math.sin(t*2.4)*1.6;
+  ctx.translate(0, -bob);
+
+  // véu
+  ctx.fillStyle = 'rgba(255,255,255,.22)';
+  ctx.beginPath();
+  ctx.moveTo(0,-96);
+  ctx.bezierCurveTo(-46,-70,-40,-6,-34,4);
+  ctx.lineTo(34,4);
+  ctx.bezierCurveTo(40,-6,46,-70,0,-96);
+  ctx.closePath(); ctx.fill();
+
+  // vestido
+  const g = ctx.createLinearGradient(0,-72,0,4);
+  g.addColorStop(0,'#ffffff'); g.addColorStop(1,'#f0dcf2');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(-11,-72); ctx.lineTo(11,-72);
+  ctx.bezierCurveTo(26,-40,34,-10,36,4);
+  ctx.lineTo(-36,4);
+  ctx.bezierCurveTo(-34,-10,-26,-40,-11,-72);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = 'rgba(214,178,224,.45)';
+  ctx.beginPath();
+  ctx.moveTo(2,-72); ctx.lineTo(36,4); ctx.lineTo(6,4);
+  ctx.closePath(); ctx.fill();
+
+  // braço esquerdo
+  ctx.fillStyle = '#f6cda6';
+  ctx.save(); ctx.translate(-14,-64); ctx.rotate(0.5);
+  rr(-4,0,8,30,4); ctx.fill(); ctx.restore();
+
+  // braço direito
+  ctx.save();
+  ctx.translate(14,-64);
+  const wv = waving ? Math.sin(t*7)*0.35 : 0;
+  ctx.rotate(-1.15 + wv);
+  ctx.fillStyle = '#f6cda6';
+  rr(-4,0,8,30,4); ctx.fill();
+  ctx.beginPath(); ctx.arc(0,32,5.5,0,7); ctx.fill();
+  ctx.restore();
+
+  // cabeça
+  ctx.fillStyle = '#f6cda6';
+  ctx.beginPath(); ctx.arc(0,-86,15,0,7); ctx.fill();
+  // cabelo
+  ctx.fillStyle = '#4a2b1c';
+  ctx.beginPath(); ctx.arc(0,-88,15.8, Math.PI*1.0, Math.PI*2.0); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(-15,-76,7,24,0.12,0,7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(15,-76,7,24,-0.12,0,7); ctx.fill();
+  ctx.beginPath(); ctx.arc(0,-89,15.8, Math.PI*1.05, Math.PI*1.95); ctx.fill();
+  // olhos
+  ctx.fillStyle = '#2b1a12';
+  ctx.beginPath(); ctx.arc(-5.5,-86,2.1,0,7); ctx.fill();
+  ctx.beginPath(); ctx.arc(5.5,-86,2.1,0,7); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.9)';
+  ctx.beginPath(); ctx.arc(-4.8,-86.8,0.8,0,7); ctx.fill();
+  ctx.beginPath(); ctx.arc(6.2,-86.8,0.8,0,7); ctx.fill();
+  // cílios
+  ctx.strokeStyle='#2b1a12'; ctx.lineWidth=1.4; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(-8.5,-88.6); ctx.lineTo(-7.2,-89.6); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(8.5,-88.6); ctx.lineTo(7.2,-89.6); ctx.stroke();
+  // boca
+  ctx.strokeStyle = '#c0655f'; ctx.lineWidth = 1.7;
+  if (sad){
+    ctx.beginPath(); ctx.arc(0,-76,4.6, 1.18*Math.PI, 1.82*Math.PI); ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.arc(0,-80.5,4.6, 0.15*Math.PI, 0.85*Math.PI); ctx.stroke();
+  }
+  // bochechas
+  ctx.fillStyle = 'rgba(255,140,170,.5)';
+  ctx.beginPath(); ctx.arc(-10,-81,3.2,0,7); ctx.fill();
+  ctx.beginPath(); ctx.arc(10,-81,3.2,0,7); ctx.fill();
+
+  // buquê
+  ctx.save();
+  ctx.translate(-22,-44);
+  ctx.fillStyle = '#3f8f4a';
+  ctx.beginPath(); ctx.ellipse(0,6,9,6,0,0,7); ctx.fill();
+  const cols = ['#ff7fb0','#ffd166','#ff5c8a','#c78bff','#fff0f5'];
+  for (let i=0;i<7;i++){
+    const a = (i/7)*Math.PI*2;
+    ctx.fillStyle = cols[i % cols.length];
+    ctx.beginPath(); ctx.arc(Math.cos(a)*6, Math.sin(a)*6 - 2, 4, 0, 7); ctx.fill();
+  }
+  ctx.restore();
+
+  ctx.restore();
+}
+
+/* ================== ITENS ================== */
+const GOOD = [
+  { type:'ring',   value:6, color:'#ffd54a' },
+  { type:'flower', value:5, color:'#ff7fb0' },
+  { type:'heart',  value:4, color:'#ff4d7d' },
+];
+function spawnItem(L){
+  const isBad = Math.random() < L.bad;
+  let it;
+  if (isBad) it = { bad:true, value:0, type:'broken', color:'#7d5ba6', r:17 };
+  else {
+    const g = GOOD[Math.floor(Math.random()*GOOD.length)];
+    it = { bad:false, value:g.value, type:g.type, color:g.color, r:16 };
+  }
+  it.x = 50 + Math.random()*(W-100);
+  it.y = -34;
+  it.vy = L.fall * (0.85 + Math.random()*0.35);
+  it.rot = 0;
+  it.spin = (Math.random()-0.5) * (isBad ? 3 : 2);
+  it.phase = Math.random()*Math.PI*2;
+  it.drift = isBad ? 26 : 16;
+  state.items.push(it);
+}
+function drawItem(it){
+  ctx.save();
+  ctx.translate(it.x, it.y); ctx.rotate(it.rot);
+
+  const glow = ctx.createRadialGradient(0,0,2,0,0,it.r*2.3);
+  glow.addColorStop(0, it.bad ? 'rgba(180,110,220,.5)' : 'rgba(255,180,220,.5)');
+  glow.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath(); ctx.arc(0,0,it.r*2.3,0,7); ctx.fill();
+
+  if (it.type === 'heart'){
+    ctx.fillStyle = it.color;
+    heartPath(0, 0, 15); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.55)';
+    ctx.beginPath(); ctx.ellipse(-5,-4,3.4,2.2,-0.6,0,7); ctx.fill();
+  }
+  else if (it.type === 'broken'){
+    ctx.fillStyle = it.color;
+    heartPath(0, 0, 15); ctx.fill();
+    ctx.strokeStyle = '#2a0b3d'; ctx.lineWidth = 2.6; ctx.lineCap='round';
+    ctx.beginPath();
+    ctx.moveTo(0,-13); ctx.lineTo(-3,-4); ctx.lineTo(3,1); ctx.lineTo(-1,12);
+    ctx.stroke();
+    ctx.fillStyle='#2a0b3d';
+    ctx.beginPath(); ctx.arc(-5,-2,1.6,0,7); ctx.fill();
+    ctx.beginPath(); ctx.arc(5,-2,1.6,0,7); ctx.fill();
+  }
+  else if (it.type === 'flower'){
+    ctx.fillStyle = it.color;
+    for (let i=0;i<6;i++){
+      const a = i/6*Math.PI*2;
+      ctx.beginPath();
+      ctx.ellipse(Math.cos(a)*8, Math.sin(a)*8, 6, 4.5, a, 0, 7);
+      ctx.fill();
+    }
+    ctx.fillStyle = '#ffe066';
+    ctx.beginPath(); ctx.arc(0,0,5.5,0,7); ctx.fill();
+  }
+  else if (it.type === 'ring'){
+    ctx.strokeStyle = '#ffd54a'; ctx.lineWidth = 4.5;
+    ctx.beginPath(); ctx.arc(0,4,10,0,7); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,.35)';
+    ctx.beginPath(); ctx.arc(-3,4,8,0.6,1.9); ctx.stroke();
+    ctx.fillStyle = '#8ce9ff';
+    ctx.beginPath();
+    ctx.moveTo(0,-13); ctx.lineTo(7,-5); ctx.lineTo(0,-1); ctx.lineTo(-7,-5);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.85)';
+    ctx.beginPath();
+    ctx.moveTo(0,-13); ctx.lineTo(0,-1); ctx.lineTo(-7,-5);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* ================== PARTÍCULAS ================== */
+function burst(x, y, color, n, spread=180){
+  for (let i=0;i<n;i++){
+    const a = Math.random()*Math.PI*2;
+    const sp = Math.random()*spread;
+    state.particles.push({
+      x, y,
+      vx: Math.cos(a)*sp, vy: Math.sin(a)*sp - 60,
+      life: 0.6 + Math.random()*0.6, max: 1.2,
+      color, size: 2 + Math.random()*4,
+    });
+  }
+  if (state.particles.length > 420) state.particles.splice(0, state.particles.length - 420);
+}
+function updateParticles(dt){
+  for (let i=state.particles.length-1;i>=0;i--){
+    const p = state.particles[i];
+    p.vy += 480*dt;
+    p.x += p.vx*dt; p.y += p.vy*dt;
+    p.vx *= (1 - 1.6*dt);
+    p.life -= dt;
+    if (p.life <= 0) state.particles.splice(i,1);
+  }
+}
+function drawParticles(){
+  for (const p of state.particles){
+    const a = clamp(p.life / p.max, 0, 1);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * (0.4 + a*0.6), 0, 7);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+/* ================== FUNDO ================== */
+function drawBackground(dt){
+  const sky = ctx.createLinearGradient(0,0,0,GROUND);
+  sky.addColorStop(0,   '#1b0630');
+  sky.addColorStop(0.45,'#4a1560');
+  sky.addColorStop(0.8, '#8e3a7a');
+  sky.addColorStop(1,   '#c9638f');
+  ctx.fillStyle = sky; ctx.fillRect(0,0,W,GROUND);
+
+  for (const s of stars){
+    const tw = 0.4 + 0.6*Math.abs(Math.sin(state.t*s.s + s.p));
+    ctx.globalAlpha = tw * 0.9;
+    ctx.fillStyle = '#fff5fb';
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  for (const h of bgHearts){
+    h.y -= h.v*dt;
+    if (h.y < -40){ h.y = H + 30; h.x = Math.random()*W; }
+    ctx.globalAlpha = h.a;
+    ctx.fillStyle = '#ffb3d9';
+    heartPath(h.x + Math.sin(state.t*0.8 + h.p)*12, h.y, h.s);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // glow do altar
+  const glow = ctx.createRadialGradient(LET_X, GROUND-110, 10, LET_X, GROUND-110, 230);
+  glow.addColorStop(0, 'rgba(255,190,230,.30)');
+  glow.addColorStop(1, 'rgba(255,190,230,0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(LET_X-240, GROUND-340, 480, 420);
+
+  // arco
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,225,240,.55)'; ctx.lineWidth = 7;
+  ctx.beginPath(); ctx.arc(LET_X, GROUND-20, 108, Math.PI, Math.PI*2); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(LET_X, GROUND-20, 116, Math.PI, Math.PI*2); ctx.stroke();
+  const petals = ['#ff9ec4','#ffd166','#ffffff','#e0aaff'];
+  for (let i=0;i<=10;i++){
+    const a = Math.PI + (i/10)*Math.PI;
+    const fx = LET_X + Math.cos(a)*108;
+    const fy = GROUND - 20 + Math.sin(a)*108;
+    ctx.fillStyle = petals[i % petals.length];
+    ctx.globalAlpha = 0.9;
+    ctx.beginPath(); ctx.arc(fx, fy, 5.5, 0, 7); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(fx, fy, 2, 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1; ctx.restore();
+
+  // chão
+  const gr = ctx.createLinearGradient(0,GROUND,0,H);
+  gr.addColorStop(0, '#3d1230'); gr.addColorStop(1, '#160620');
+  ctx.fillStyle = gr; ctx.fillRect(0, GROUND, W, H-GROUND);
+
+  // tapete
+  const cp = ctx.createLinearGradient(0,GROUND,0,GROUND+74);
+  cp.addColorStop(0, '#b3243f'); cp.addColorStop(0.5,'#8e1a33'); cp.addColorStop(1, '#5c0f21');
+  ctx.fillStyle = cp; ctx.fillRect(24, GROUND, W-48, 74);
+  ctx.strokeStyle = 'rgba(255,214,120,.75)'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(24,GROUND+2); ctx.lineTo(W-24,GROUND+2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(24,GROUND+72); ctx.lineTo(W-24,GROUND+72); ctx.stroke();
+
+  for (let i=0;i<26;i++){
+    const px = ((i*137.5) % (W-80)) + 40;
+    const py = GROUND + 12 + ((i*53) % 50);
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = i % 3 === 0 ? '#ffd166' : '#ff9ec4';
+    ctx.beginPath(); ctx.ellipse(px, py, 4, 2.2, i, 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // vinheta
+  const vg = ctx.createRadialGradient(W/2,H/2,H*0.35,W/2,H/2,H*0.95);
+  vg.addColorStop(0,'rgba(0,0,0,0)');
+  vg.addColorStop(1,'rgba(10,0,20,.65)');
+  ctx.fillStyle = vg; ctx.fillRect(0,0,W,H);
+}
+
+/* ================== HUD ================== */
+function drawHUD(){
+  const L = LEVELS[state.level];
+  ctx.fillStyle = 'rgba(20,4,32,.62)';
+  rr(14, 12, W-28, 60, 16); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,160,205,.35)'; ctx.lineWidth = 1.5; ctx.stroke();
+
+  // nome fase
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffd9ec';
+  ctx.font = 'bold 14px system-ui, sans-serif';
+  ctx.fillText(L.name, 30, 30);
+
+  // vidas
+  for (let i=0;i<MAX_LIVES;i++){
+    const hx = 30 + i*24;
+    const hy = 56;
+    if (i < state.lives){
+      ctx.fillStyle = '#ff4d7d';
+      heartPath(hx, hy, 9); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,.55)';
+      heartPath(hx-2, hy-2, 3); ctx.fill();
+    } else {
+      ctx.strokeStyle = 'rgba(255,180,210,.5)'; ctx.lineWidth = 1.5;
+      heartPath(hx, hy, 9); ctx.stroke();
+    }
+  }
+
+  // barra
+  const mx = 130, mw = 470, my = 22, mh = 16;
+  ctx.fillStyle = 'rgba(255,255,255,.13)';
+  rr(mx, my, mw, mh, 8); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.22)'; ctx.lineWidth = 1.5; ctx.stroke();
+
+  const pct = clamp(state.love / L.goal, 0, 1);
+  if (pct > 0.005){
+    const g = ctx.createLinearGradient(mx, 0, mx+mw, 0);
+    g.addColorStop(0, '#ff8ec7'); g.addColorStop(0.5,'#ff4d8d'); g.addColorStop(1,'#ff1f5f');
+    ctx.fillStyle = g;
+    rr(mx, my, Math.max(mh, mw*pct), mh, 8); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.28)';
+    rr(mx+2, my+2, Math.max(mh-4, mw*pct-4), mh*0.35, 4); ctx.fill();
+  }
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 11px system-ui, sans-serif';
+  ctx.fillText(`${Math.floor(state.love)} / ${L.goal}`, mx+mw/2, my+mh/2+1);
+
+  // cronômetro
+  ctx.textAlign = 'right';
+  const urgent = state.timeLeft < 10;
+  ctx.fillStyle = urgent ? (Math.sin(state.t*14) > 0 ? '#ff6b6b' : '#ffb3b3') : '#ffffff';
+  ctx.font = 'bold 22px system-ui, sans-serif';
+  ctx.fillText(Math.ceil(state.timeLeft) + 's', W-30, 36);
+
+  ctx.textAlign = 'left';
+}
+
+/* ================== JOYSTICK DESENHO ================== */
+function drawJoystick(){
+  let bx, by, kx, ky, alpha;
+  if (JOY.active){
+    bx = JOY.cx; by = JOY.cy;
+    kx = JOY.kx; ky = JOY.ky;
+    alpha = 0.9;
+  } else {
+    bx = JOY.hint.x; by = JOY.hint.y;
+    kx = bx; ky = by;
+    alpha = JOY.hint.a + Math.sin(state.t*2.4)*0.06;
+  }
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  // base
+  const g1 = ctx.createRadialGradient(bx, by, 5, bx, by, JOY.baseR);
+  g1.addColorStop(0, 'rgba(255,200,230,.22)');
+  g1.addColorStop(1, 'rgba(255,200,230,.05)');
+  ctx.fillStyle = g1;
+  ctx.beginPath(); ctx.arc(bx, by, JOY.baseR, 0, 7); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,180,220,.55)';
+  ctx.lineWidth = 3; ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,180,220,.35)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(bx, by, JOY.baseR*0.65, 0, 7); ctx.stroke();
+
+  // marcas direcionais
+  ctx.strokeStyle = 'rgba(255,200,230,.7)'; ctx.lineWidth = 2.5;
+  for (let i=0;i<4;i++){
+    const a = i*Math.PI/2;
+    ctx.beginPath();
+    ctx.moveTo(bx + Math.cos(a)*JOY.baseR*0.78, by + Math.sin(a)*JOY.baseR*0.78);
+    ctx.lineTo(bx + Math.cos(a)*JOY.baseR*0.95, by + Math.sin(a)*JOY.baseR*0.95);
+    ctx.stroke();
+  }
+
+  // knob
+  const g2 = ctx.createRadialGradient(kx-9, ky-9, 4, kx, ky, JOY.knobR);
+  g2.addColorStop(0, '#ffb4d6');
+  g2.addColorStop(1, '#c81e5b');
+  ctx.fillStyle = g2;
+  ctx.beginPath(); ctx.arc(kx, ky, JOY.knobR, 0, 7); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.65)'; ctx.lineWidth = 2; ctx.stroke();
+  // brilho
+  ctx.fillStyle = 'rgba(255,255,255,.35)';
+  ctx.beginPath(); ctx.ellipse(kx-11, ky-11, 11, 7, -0.5, 0, 7); ctx.fill();
+
+  ctx.restore();
+}
+
+/* ================== LÓGICA ================== */
+function startGame(){
+  initAudio();
+  state.level = 0;
+  resetLevel();
+}
+function resetLevel(){
+  const L = LEVELS[state.level];
+  state.love = 0;
+  state.lives = MAX_LIVES;
+  state.invuln = 0;
+  state.timeLeft = L.time;
+  state.items.length = 0;
+  state.particles.length = 0;
+  state.spawnT = 0.6;
+  state.player.x = 260;
+  state.player.vx = 0;
+  state.shake = 0;
+  state.scene = 'playing';
+  JOY.active = false; JOY.vx = 0; JOY.vy = 0;
+}
+function nextLevel(){
+  state.level++;
+  if (state.level >= LEVELS.length){
+    state.scene = 'wedding';
+    state.wedT = 0;
+    state.confetti = [];
+    sfx(523,0.18,'triangle',0.07);
+    setTimeout(()=>sfx(659,0.18,'triangle',0.07),160);
+    setTimeout(()=>sfx(784,0.30,'triangle',0.07),320);
+    setTimeout(()=>sfx(1046,0.5,'triangle',0.07),500);
+    return;
+  }
+  resetLevel();
+}
+function collect(it){
+  if (it.bad){
+    state.lives--;
+    state.invuln = 1.4;
+    state.shake = 1;
+    burst(it.x, it.y, '#a67cd6', 18, 220);
+    sfx(180, 0.24, 'sawtooth', 0.06, -100);
+    if (state.lives <= 0) {
+      state.scene = 'gameover';
+      state.leavingX = LET_X;
+      sfx(260,0.35,'sawtooth',0.06,-140);
+      setTimeout(()=>sfx(180,0.5,'sawtooth',0.06,-120),200);
+    }
+  } else {
+    state.love += it.value;
+    burst(it.x, it.y, it.color, 13, 170);
+    sfx(500 + it.value*60, 0.10, 'sine', 0.05, 240);
+  }
+}
+
+/* ================== UPDATE ================== */
+function updatePlaying(dt){
+  const L = LEVELS[state.level];
+  const p = state.player;
+
+  if (state.invuln > 0) state.invuln -= dt;
+
+  state.timeLeft -= dt;
+  if (state.timeLeft <= 0){
+    state.timeLeft = 0;
+    state.scene = 'gameover';
+    state.leavingX = LET_X;
+    sfx(300,0.3,'sawtooth',0.06,-160);
+    setTimeout(()=>sfx(200,0.45,'sawtooth',0.06,-120),180);
+    return;
+  }
+
+  // Movimento: joystick ou teclado
+  const speed = 460;
+  let mv = 0;
+  if (keys.left)  mv -= 1;
+  if (keys.right) mv += 1;
+  if (mv === 0){
+    // deadzone
+    const dz = 0.18;
+    let jx = JOY.vx;
+    if (Math.abs(jx) < dz) jx = 0;
+    else jx = (jx - Math.sign(jx)*dz) / (1-dz);
+    mv = jx;
+  }
+  p.x += mv * speed * dt;
+  p.x = clamp(p.x, MIN_X, MAX_X);
+
+  // Spawn
+  state.spawnT -= dt;
+  if (state.spawnT <= 0){
+    state.spawnT = L.spawn * (0.72 + Math.random()*0.56);
+    spawnItem(L);
+  }
+
+  // Itens
+  for (let i = state.items.length-1; i >= 0; i--){
+    const it = state.items[i];
+    it.y += it.vy * dt;
+    it.rot += it.spin * dt;
+    it.x += Math.sin(state.t*3 + it.phase) * it.drift * dt;
+    it.x = clamp(it.x, 26, W-26);
+
+    if (it.y > GROUND-96 && it.y < GROUND+10 && Math.abs(it.x - p.x) < 42){
+      if (state.invuln <= 0 || !it.bad){
+        if (it.bad && state.invuln > 0) { /* ignora durante invuln */ }
+        else { collect(it); }
+        state.items.splice(i,1);
+        continue;
+      }
+    }
+    if (it.y > GROUND + 30) state.items.splice(i,1);
+  }
+
+  if (state.love >= L.goal && state.scene === 'playing'){
+    state.love = L.goal;
+    state.scene = 'cutscene';
+    state.cutT = 0;
+    state.items.length = 0;
+    sfx(660,0.15,'sine',0.06,220);
+    setTimeout(()=>sfx(880,0.18,'sine',0.06,220),150);
+    setTimeout(()=>sfx(1100,0.28,'sine',0.06,200),310);
+  }
+}
+
+function updateCutscene(dt){
+  state.cutT += dt;
+  const p = state.player;
+  const targetX = LET_X - 68;
+  p.x += (targetX - p.x) * Math.min(1, dt*3.6);
+  if (Math.random() < dt*14){
+    burst(LET_X - 40 + Math.random()*80, GROUND - 130 - Math.random()*90, '#ff6fa5', 1, 60);
+  }
+  if (state.cutT > 2.3){
+    state.scene = 'levelup';
+    state.msgTimer = 3.0;
+  }
+}
+
+function updateGameover(dt){
+  // Letícia se afasta
+  state.leavingX += 130 * dt;
+  if (state.leavingX > W + 120) state.leavingX = W + 120;
+}
+
+function updateWedding(dt){
+  state.wedT += dt;
+
+  // Confete contínuo a partir de 3.5s
+  if (state.wedT > 3.5){
+    const n = Math.floor(dt*22) + 1;
+    for (let i=0;i<n;i++){
+      state.confetti.push({
+        x: Math.random()*W,
+        y: -20 - Math.random()*30,
+        vy: 90 + Math.random()*160,
+        vx: (Math.random()-0.5)*70,
+        s: 5 + Math.random()*7,
+        rot: Math.random()*6.28,
+        vr: (Math.random()-0.5)*6,
+        c: ['#ff6fa5','#ffd166','#8ce9ff','#c78bff','#ffffff','#ff4d7d'][Math.floor(Math.random()*6)],
+      });
+    }
+  }
+  for (const c of state.confetti){
+    c.y += c.vy*dt;
+    c.x += c.vx*dt + Math.sin(state.t*2 + c.rot)*0.6;
+    c.rot += c.vr*dt;
+    if (c.y > H + 20){ c.y = -20; c.x = Math.random()*W; }
+  }
+
+  // corações subindo
+  if (state.wedT > 1.4 && Math.random() < dt*6){
+    burst(W/2 + (Math.random()-0.5)*160, GROUND - 60, '#ff5c8a', 1, 40);
+  }
+
+  // som do beijo
+  if (state.wedT > 3.4 && !state._kissPlayed){
+    state._kissPlayed = true;
+    sfx(880,0.12,'sine',0.07,300);
+    setTimeout(()=>sfx(1200,0.3,'triangle',0.07,200),120);
+    // explosão de corações
+    for (let i=0;i<3;i++){
+      setTimeout(()=>{
+        burst(W/2 + (Math.random()-0.5)*100, 230 + Math.random()*60, '#ff2d6f', 18, 220);
+      }, i*120);
+    }
+  }
+}
+
+function update(dt){
+  state.t += dt;
+  if (state.shake > 0) state.shake = Math.max(0, state.shake - dt*3.2);
+  updateParticles(dt);
+
+  if (state.scene === 'playing')       updatePlaying(dt);
+  else if (state.scene === 'cutscene') updateCutscene(dt);
+  else if (state.scene === 'levelup'){
+    state.msgTimer -= dt;
+    if (state.msgTimer <= 0) nextLevel();
+  }
+  else if (state.scene === 'gameover') updateGameover(dt);
+  else if (state.scene === 'wedding')  updateWedding(dt);
+}
+
+/* ================== RENDER ================== */
+function render(dt){
+  ctx.clearRect(0,0,W,H);
+
+  ctx.save();
+  if (state.shake > 0){
+    const s = state.shake * 9;
+    ctx.translate((Math.random()-0.5)*s, (Math.random()-0.5)*s);
+  }
+  drawBackground(dt);
+
+  if (state.scene === 'menu'){
+    drawLeticia(LET_X, GROUND, 1, state.t, true, false);
+    drawCesar(340, GROUND, 1, state.t, true, false);
+    ctx.restore();
+    drawMenu();
+    return;
+  }
+
+  if (state.scene === 'playing' || state.scene === 'cutscene'){
+    for (const it of state.items) drawItem(it);
+    drawLeticia(LET_X, GROUND, 1, state.t, true, false);
+    const walking = keys.left || keys.right || Math.abs(JOY.vx) > 0.15;
+    const inv = state.invuln > 0 && Math.floor(state.t*14) % 2 === 0;
+    if (!inv) drawCesar(state.player.x, GROUND, 1, state.t, walking, false);
+
+    if (state.scene === 'cutscene' && state.cutT > 0.9){
+      const a = clamp((state.cutT-0.9)/0.7, 0, 1);
+      const size = 26 + Math.sin(state.t*6)*4;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = '#ff3d7a';
+      heartPath((state.player.x + LET_X)/2, GROUND - 150, size); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,.5)';
+      heartPath((state.player.x + LET_X)/2 - 8, GROUND - 158, size*0.32); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    drawParticles();
+    ctx.restore();
+
+    drawHUD();
+    drawJoystick();
+    // dica
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = '#ffd8ec';
+    ctx.font = '12px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Arraste em qualquer lugar para usar o joystick', W/2, H-14);
+    ctx.globalAlpha = 1;
+    ctx.textAlign = 'left';
+    return;
+  }
+
+  if (state.scene === 'levelup'){
+    drawParticles();
+    ctx.restore();
+    drawLevelUp();
+    return;
+  }
+
+  if (state.scene === 'gameover'){
+    // Cesar triste à esquerda
+    drawCesar(160, GROUND, 1, state.t, false, true);
+    // Letícia se afastando
+    const fade = clamp(1 - (state.leavingX - LET_X) / (W*1.1), 0, 1);
+    ctx.globalAlpha = fade;
+    drawLeticia(state.leavingX, GROUND, 1, state.t, false, true);
+    ctx.globalAlpha = 1;
+
+    // pequenas lágrimas caindo perto do Cesar
+    if (Math.random() < dt*3){
+      state.particles.push({
+        x: 160 + (Math.random()-0.5)*20, y: GROUND - 90,
+        vx: (Math.random()-0.5)*20, vy: 40,
+        life: 0.9, max: 0.9, color:'#a8d8ff', size:2.4
+      });
+    }
+    drawParticles();
+    ctx.restore();
+    drawGameOver();
+    return;
+  }
+
+  if (state.scene === 'wedding'){
+    ctx.restore();
+    drawWedding();
+    return;
+  }
+}
+
+/* ================== CENAS ================== */
+function drawControlsHint(){}
+
+function drawMenu(){
+  ctx.fillStyle = 'rgba(14,2,24,.72)';
+  rr(90, 70, W-180, 330, 26); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,150,200,.4)'; ctx.lineWidth = 2; ctx.stroke();
+
+  ctx.textAlign = 'center';
+  const g = ctx.createLinearGradient(0, 100, 0, 170);
+  g.addColorStop(0, '#ffe3f1'); g.addColorStop(0.5,'#ff8ec7'); g.addColorStop(1, '#ff2d6f');
+  ctx.fillStyle = g;
+  ctx.font = 'bold 52px Georgia, serif';
+  ctx.fillText('Letícia & Cesar', W/2, 152);
+
+  ctx.fillStyle = '#ffd166';
+  ctx.font = 'bold 26px Georgia, serif';
+  ctx.fillText('✨ O Grande SIM ✨', W/2, 194);
+
+  ctx.fillStyle = '#ff5c8a';
+  heartPath(W/2 - 250, 150, 16); ctx.fill();
+  heartPath(W/2 + 250, 150, 16); ctx.fill();
+
+  ctx.fillStyle = '#ffe9f5';
+  ctx.font = '16px system-ui, sans-serif';
+  ctx.fillText('Ajude Cesar a conquistar Letícia!', W/2, 242);
+  ctx.font = '14px system-ui, sans-serif';
+  ctx.fillStyle = '#e9b8d8';
+  ctx.fillText('Use o joystick (arraste em qualquer lugar) para mover.', W/2, 272);
+  ctx.fillText('Pegue 💍 🌸 💗 e fuja dos 💔 — se pegar 3, ela te deixa!', W/2, 296);
+  ctx.fillText('Encha o medidor em 3 fases e chegue ao altar.', W/2, 320);
+
+  const pulse = 0.6 + 0.4*Math.abs(Math.sin(state.t*3));
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ff3d7a';
+  rr(W/2 - 150, 340, 300, 48, 24); ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 20px system-ui, sans-serif';
+  ctx.fillText('▶  COMEÇAR', W/2, 371);
+
+  ctx.fillStyle = 'rgba(255,220,240,.6)';
+  ctx.font = '13px system-ui, sans-serif';
+  ctx.fillText('(toque em qualquer lugar ou pressione ESPAÇO)', W/2, 425);
+}
+
+function drawLevelUp(){
+  const a = clamp((3.0 - state.msgTimer) / 0.4, 0, 1);
+  ctx.globalAlpha = a * 0.85;
+  ctx.fillStyle = 'rgba(14,2,24,1)';
+  ctx.fillRect(0,0,W,H);
+  ctx.globalAlpha = a;
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd166';
+  ctx.font = 'bold 40px Georgia, serif';
+  ctx.fillText('FASE CONCLUÍDA!', W/2, 230);
+
+  ctx.fillStyle = '#ff8ec7';
+  heartPath(W/2, 300, 34); ctx.fill();
+
+  ctx.fillStyle = '#ffe9f5';
+  ctx.font = 'italic 21px Georgia, serif';
+  ctx.fillText(MSGS[state.level] || '', W/2, 380);
+
+  ctx.fillStyle = 'rgba(255,220,240,.65)';
+  ctx.font = '14px system-ui, sans-serif';
+  ctx.fillText(state.level + 1 < LEVELS.length
+    ? 'Preparando a próxima fase...'
+    : 'Preparando o grande dia...', W/2, 440);
+  ctx.globalAlpha = 1;
+}
+
+function drawGameOver(){
+  ctx.fillStyle = 'rgba(14,2,24,.62)';
+  ctx.fillRect(0,0,W,H);
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#ff6b6b';
+  ctx.font = 'bold 46px Georgia, serif';
+  ctx.fillText('ELA TE DEIXOU...', W/2, 180);
+
+  ctx.fillStyle = '#ffb3c9';
+  heartPath(W/2, 250, 30); ctx.fill();
+  // rachadura
+  ctx.strokeStyle = '#2a0b3d'; ctx.lineWidth = 3; ctx.lineCap='round';
+  ctx.beginPath();
+  ctx.moveTo(W/2-3, 232); ctx.lineTo(W/2+4, 246); ctx.lineTo(W/2-3, 258); ctx.lineTo(W/2+3, 272);
+  ctx.stroke();
+
+  ctx.fillStyle = '#ffe9f5';
+  ctx.font = 'italic 19px Georgia, serif';
+  ctx.fillText('O amor precisa de cuidado, Cesar...', W/2, 330);
+  ctx.font = '16px system-ui, sans-serif';
+  ctx.fillStyle = '#e9b8d8';
+  ctx.fillText('Cuidado com os corações partidos na próxima vez!', W/2, 362);
+
+  const pulse = 0.6 + 0.4*Math.abs(Math.sin(state.t*3));
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ff3d7a';
+  rr(W/2-150, 400, 300, 50, 25); ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 20px system-ui, sans-serif';
+  ctx.fillText('TENTAR DE NOVO', W/2, 432);
+
+  ctx.fillStyle = 'rgba(255,220,240,.5)';
+  ctx.font = '12px system-ui, sans-serif';
+  ctx.fillText('(toque para recomeçar a fase)', W/2, 470);
+}
+
+/* ---------- CASAMENTO ---------- */
+function drawWedding(){
+  const t = state.wedT;
+
+  // posições com easing
+  const walk = smooth(clamp(t / 1.3, 0, 1));
+  let cesarX = lerp(180, W/2 - 52, walk);
+  let letX   = lerp(W - 180, W/2 + 52, walk);
+
+  // aproximação final p/ o beijo
+  if (t > 2.6){
+    const k = clamp((t - 2.6) / 0.8, 0, 1);
+    cesarX += k * 22;
+    letX   -= k * 22;
+  }
+
+  // "pulinho" de alegria
+  const jump = (t > 3.6 && t < 4.2) ? Math.sin((t-3.6)/0.6 * Math.PI) * 14 : 0;
+
+  // confete
+  for (const c of state.confetti){
+    ctx.save();
+    ctx.translate(c.x, c.y); ctx.rotate(c.rot);
+    ctx.fillStyle = c.c;
+    ctx.fillRect(-c.s/2, -c.s/2, c.s, c.s*0.6);
+    ctx.restore();
+  }
+
+  // personagens
+  drawCesar(cesarX, GROUND - jump, 1.05, state.t, t < 1.3, false);
+  drawLeticia(letX,   GROUND - jump, 1.05, state.t, false, false);
+
+  // mãos dadas / coração entre eles
+  if (t > 1.3 && t < 3.4){
+    const a = clamp((t - 1.3)/0.5, 0, 1);
+    const beat = 1 + Math.sin(state.t*7)*0.08;
+    ctx.globalAlpha = a;
+    ctx.save();
+    ctx.translate((cesarX + letX)/2, GROUND - 150 - jump);
+    ctx.scale(beat, beat);
+    const g = ctx.createRadialGradient(0,-8,5,0,0,72);
+    g.addColorStop(0,'#ff8ec7'); g.addColorStop(1,'#ff1f5f');
+    ctx.fillStyle = g;
+    heartPath(0, 0, 42); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.6)';
+    heartPath(-14, -14, 11); ctx.fill();
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  // troca de anéis (2.6 – 4.0)
+  if (t > 2.6 && t < 4.2){
+    const a = clamp((t - 2.6)/0.4, 0, 1);
+    const k = clamp((t - 2.6) / 1.0, 0, 1);
+    const rx = lerp(cesarX, letX, k);
+    const ry = GROUND - 130 - Math.sin(k*Math.PI) * 50;
+    ctx.globalAlpha = a * (1 - clamp((t-3.9)/0.4, 0, 1));
+    // brilho
+    const gl = ctx.createRadialGradient(rx, ry, 2, rx, ry, 40);
+    gl.addColorStop(0, 'rgba(255,240,180,.9)');
+    gl.addColorStop(1, 'rgba(255,240,180,0)');
+    ctx.fillStyle = gl;
+    ctx.beginPath(); ctx.arc(rx, ry, 40, 0, 7); ctx.fill();
+    // anel
+    ctx.strokeStyle = '#ffd54a'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.arc(rx, ry, 13, 0, 7); ctx.stroke();
+    ctx.fillStyle = '#8ce9ff';
+    ctx.beginPath();
+    ctx.moveTo(rx, ry-18); ctx.lineTo(rx+9, ry-8);
+    ctx.lineTo(rx, ry-3); ctx.lineTo(rx-9, ry-8);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.9)';
+    ctx.beginPath();
+    ctx.moveTo(rx, ry-18); ctx.lineTo(rx, ry-3); ctx.lineTo(rx-9, ry-8);
+    ctx.closePath(); ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // chuvinha de anéis
+    if (Math.random() < 0.06){
+      state.particles.push({
+        x: rx + (Math.random()-0.5)*60, y: ry,
+        vx: (Math.random()-0.5)*120, vy: -60 - Math.random()*80,
+        life: 1.0, max: 1.0, color:'#ffe066', size: 3
+      });
+    }
+  }
+
+  // "beijo" - coração grande pulsando entre eles
+  if (t > 3.4){
+    const a = clamp((t - 3.4)/0.5, 0, 1);
+    const beat = 1 + Math.sin(state.t*9)*0.10;
+    ctx.globalAlpha = a;
+    ctx.save();
+    ctx.translate((cesarX + letX)/2 + 4, GROUND - 118 - jump);
+    ctx.scale(beat, beat);
+    const g = ctx.createRadialGradient(0,-10,6,0,0,50);
+    g.addColorStop(0,'#ffe0ec'); g.addColorStop(0.55,'#ff4d8d'); g.addColorStop(1,'#c81e5b');
+    ctx.fillStyle = g;
+    heartPath(0, 0, 26); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.75)';
+    heartPath(-7, -7, 6); ctx.fill();
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  // partículas
+  drawParticles();
+
+  // textos da cerimônia
+  ctx.textAlign = 'center';
+
+  // Fase de texto 1
+  if (t > 0.4 && t < 2.8){
+    const a = clamp(Math.min((t-0.4)/0.4, (2.8-t)/0.4), 0, 1);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = 'rgba(14,2,24,.6)';
+    rr(W/2 - 240, 40, 480, 56, 18); ctx.fill();
+    ctx.fillStyle = '#ffd166';
+    ctx.font = 'bold 22px Georgia, serif';
+    ctx.fillText('Cesar caminha até o altar...', W/2, 76);
+    ctx.globalAlpha = 1;
+  }
+
+  // Fase de texto 2
+  if (t > 2.8 && t < 4.0){
+    const a = clamp(Math.min((t-2.8)/0.4, (4.0-t)/0.4), 0, 1);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = 'rgba(14,2,24,.6)';
+    rr(W/2 - 240, 40, 480, 56, 18); ctx.fill();
+    ctx.fillStyle = '#ffe9f5';
+    ctx.font = 'bold 22px Georgia, serif';
+    ctx.fillText('💍  A troca das alianças  💍', W/2, 76);
+    ctx.globalAlpha = 1;
+  }
+
+  // Título final
+  if (t > 4.2){
+    const a = clamp((t - 4.2)/0.6, 0, 1);
+    ctx.globalAlpha = a;
+
+    // faixa
+    ctx.fillStyle = 'rgba(14,2,24,.7)';
+    rr(70, 40, W-140, 100, 24); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,200,230,.55)'; ctx.lineWidth = 2; ctx.stroke();
+
+    ctx.fillStyle = '#ffd166';
+    ctx.font = 'bold 40px Georgia, serif';
+    ctx.fillText('LETÍCIA & CESAR', W/2, 84);
+
+    ctx.fillStyle = '#ffe9f5';
+    ctx.font = 'bold 24px Georgia, serif';
+    ctx.fillText('💍  SE CASARAM!  💍', W/2, 122);
+
+    ctx.fillStyle = 'rgba(255,220,240,.85)';
+    ctx.font = 'italic 17px Georgia, serif';
+    ctx.fillText('"E viveram felizes para sempre..."', W/2, H - 96);
+
+    ctx.globalAlpha = 1;
+
+    // botão replay
+    if (t > 6.0){
+      const pulse = 0.65 + 0.35*Math.abs(Math.sin(state.t*3));
+      ctx.globalAlpha = pulse;
+      ctx.fillStyle = '#ff3d7a';
+      rr(W/2-150, H-72, 300, 48, 24); ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 19px system-ui, sans-serif';
+      ctx.fillText('💕  JOGAR NOVAMENTE', W/2, H-42);
+    }
+  }
+}
+
+/* ================== INPUT ================== */
+function canvasCoords(clientX, clientY){
+  const r = cvs.getBoundingClientRect();
+  return {
+    x: (clientX - r.left) / r.width  * W,
+    y: (clientY - r.top)  / r.height * H,
+  };
+}
+function handleAction(){
+  initAudio();
+  if (state.scene === 'menu') startGame();
+  else if (state.scene === 'levelup' && state.msgTimer < 2.5) nextLevel();
+  else if (state.scene === 'gameover') resetLevel();
+  else if (state.scene === 'wedding' && state.wedT > 6.0){
+    state.scene = 'menu';
+    state._kissPlayed = false;
+  }
+}
+
+window.addEventListener('keydown', e => {
+  if (e.code === 'ArrowLeft'  || e.code === 'KeyA'){ keys.left = true;  e.preventDefault(); }
+  if (e.code === 'ArrowRight' || e.code === 'KeyD'){ keys.right = true; e.preventDefault(); }
+  if (e.code === 'Space' || e.code === 'Enter'){ handleAction(); e.preventDefault(); }
+});
+window.addEventListener('keyup', e => {
+  if (e.code === 'ArrowLeft'  || e.code === 'KeyA') keys.left = false;
+  if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = false;
+});
+
+// Pointer events (mouse + toque)
+function onPointerDown(e){
+  e.preventDefault();
+  initAudio();
+
+  if (state.scene === 'playing'){
+    const p = canvasCoords(e.clientX, e.clientY);
+    JOY.active = true;
+    JOY.pointerId = e.pointerId;
+    JOY.cx = p.x;
+    JOY.cy = p.y;
+    JOY.kx = p.x;
+    JOY.ky = p.y;
+    JOY.vx = 0;
+    JOY.vy = 0;
+    try { cvs.setPointerCapture(e.pointerId); } catch(err){}
+  } else {
+    handleAction();
+  }
+}
+function onPointerMove(e){
+  if (!JOY.active || e.pointerId !== JOY.pointerId) return;
+  e.preventDefault();
+  const p = canvasCoords(e.clientX, e.clientY);
+  let dx = p.x - JOY.cx;
+  let dy = p.y - JOY.cy;
+  const d = Math.hypot(dx, dy);
+  const maxR = JOY.maxR;
+  if (d > maxR){
+    dx = dx / d * maxR;
+    dy = dy / d * maxR;
+  }
+  JOY.kx = JOY.cx + dx;
+  JOY.ky = JOY.cy + dy;
+  JOY.vx = dx / maxR;
+  JOY.vy = dy / maxR;
+}
+function onPointerUp(e){
+  if (e.pointerId !== JOY.pointerId) return;
+  JOY.active = false;
+  JOY.pointerId = null;
+  JOY.vx = 0;
+  JOY.vy = 0;
+}
+
+if (window.PointerEvent){
+  cvs.addEventListener('pointerdown', onPointerDown, { passive:false });
+  cvs.addEventListener('pointermove', onPointerMove, { passive:false });
+  cvs.addEventListener('pointerup',   onPointerUp);
+  cvs.addEventListener('pointercancel', onPointerUp);
+} else {
+  // fallback
+  cvs.addEventListener('mousedown', e => onPointerDown({...e, pointerId:1, clientX:e.clientX, clientY:e.clientY, preventDefault:()=>e.preventDefault()}));
+  window.addEventListener('mousemove', e => onPointerMove({pointerId:1, clientX:e.clientX, clientY:e.clientY, preventDefault:()=>e.preventDefault()}));
+  window.addEventListener('mouseup', () => onPointerUp({pointerId:1}));
+
+  cvs.addEventListener('touchstart', e => {
+    const t = e.touches[0];
+    onPointerDown({pointerId:t.identifier, clientX:t.clientX, clientY:t.clientY, preventDefault:()=>e.preventDefault()});
+  }, {passive:false});
+  cvs.addEventListener('touchmove', e => {
+    const t = e.touches[0];
+    onPointerMove({pointerId:t.identifier, clientX:t.clientX, clientY:t.clientY, preventDefault:()=>e.preventDefault()});
+  }, {passive:false});
+  cvs.addEventListener('touchend', e => {
+    const t = e.changedTouches[0];
+    onPointerUp({pointerId:t.identifier});
+  });
+}
+
+cvs.addEventListener('contextmenu', e => e.preventDefault());
+
+/* ================== FULLSCREEN ================== */
+const fsBtn = document.getElementById('fsBtn');
+fsBtn.addEventListener('click', e => {
+  e.stopPropagation();
+  const el = document.documentElement;
+  if (!document.fullscreenElement && !document.webkitFullscreenElement){
+    if (el.requestFullscreen) el.requestFullscreen();
+    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+  } else {
+    if (document.exitFullscreen) document.exitFullscreen();
+    else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+  }
+});
+function updateFsIcon(){
+  const on = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  fsBtn.textContent = on ? '⤡' : '⛶';
+}
+document.addEventListener('fullscreenchange', updateFsIcon);
+document.addEventListener('webkitfullscreenchange', updateFsIcon);
+
+/* ================== LOOP ================== */
+let last = performance.now();
+function loop(now){
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.05) dt = 0.05;
+  update(dt);
+  render(dt);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
